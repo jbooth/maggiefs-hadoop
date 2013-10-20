@@ -1,6 +1,7 @@
 package org.maggiefs.hadoop;
 
 import java.io.OutputStream;
+import java.util.Arrays;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
@@ -17,7 +18,6 @@ public class TestFSReplicates {
 
 	public static void main(String[] args) throws Exception {
 		Path testFilePath = new Path(args[0]);
-		int numReplicas = Integer.parseInt(args[1]);
 
 		byte[] b = new byte[65536];
 		FileSystem fs = FileSystem.get(new Configuration());
@@ -33,7 +33,10 @@ public class TestFSReplicates {
 		out.close();
 		BlockLocation[] locs = fs.getFileBlockLocations(
 				fs.getFileStatus(testFilePath), 0, (200 * 1024 * 1024));
-		System.out.println(locs);
+		for (int i = 0 ; i < locs.length ; i++) {
+			System.out.println("hosts for block " + i + " : " + Arrays.asList(locs[i].getHosts()));
+			
+		}
 		
 		
 	}
