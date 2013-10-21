@@ -35,7 +35,7 @@ public class TestFSReplicates {
 				fs.getFileStatus(testFilePath), 0, (200 * 1024 * 1024));
 		for (int i = 0 ; i < locs.length ; i++) {
 			System.out.println("hosts for block " + i + " : " + Arrays.asList(locs[i].getHosts()));
-			
+			System.out.println("topology for block  " + i + " : " + Arrays.asList(locs[i].getTopologyPaths()));
 		}
 		
 		
