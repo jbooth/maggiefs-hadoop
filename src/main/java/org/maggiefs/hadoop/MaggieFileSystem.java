@@ -1,6 +1,5 @@
 package org.maggiefs.hadoop;
 
-import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -10,14 +9,14 @@ import java.net.URISyntaxException;
 import org.apache.commons.httpclient.HttpClient;
 import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
 import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.io.FileUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RawLocalFileSystem;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -27,13 +26,14 @@ import org.codehaus.jackson.map.ObjectMapper;
 /**
  * Wrapper for maggiefs for use by Hadoop.
  * 
- * fs.default.name should be of the form mfs://localhost:localWebPort/localMountPoint.
- * This allows us to avoid any further configuration, by either delegating to
- * to our local mount for all FS operations.
+ * fs.default.name should be of the form
+ * mfs://localhost:localWebPort/localMountPoint. This allows us to avoid any
+ * further configuration, by either delegating to to our local mount for all FS
+ * operations.
  * 
  */
 public class MaggieFileSystem extends FileSystem {
-	
+	static Log LOG = LogFactory.getLog(MaggieFileSystem.class);
 	private URI name;
 	private RawLocalFileSystem raw;
 	private Path workingDir;
@@ -54,7 +54,7 @@ public class MaggieFileSystem extends FileSystem {
 	private Path lookup(Path path) {
 		// handle working dir
 		if (!path.isAbsolute()) {
-			path = new Path(workingDir,path);
+			path = new Path(workingDir, path);
 		}
 		// handle mountpoint
 		String p = path.toUri().getPath();
@@ -93,23 +93,29 @@ public class MaggieFileSystem extends FileSystem {
 		super.initialize(uri, conf);
 		setConf(conf);
 		this.raw = (RawLocalFileSystem) FileSystem.getLocal(conf).getRaw();
-		if (!uri.getPath().startsWith("/")) {
-			throw new RuntimeException("Mountpoint must be absolute!");
-		}
-		try {
-			this.name = new URI("mfs://localhost:" + uri.getPort() 	+ uri.getPath());
-		} catch (URISyntaxException e) {
-			throw new RuntimeException(e);
-		}
-		//this.mountPath = new Path("file", null, uri.getPath());
-		this.mountPathStr = uri.getPath();
+		this.name = uri;
 		this.peerWebPort = uri.getPort();
+		// this.mountPath = new Path("file", null, uri.getPath());
+		// get mountPath from local service endpoint
+		GetMethod get = new GetMethod("http://localhost:" + this.peerWebPort + "/mountPoint");
+		try {
+			int status = httpClient.executeMethod(get);
+			if (status >= 300) {
+				throw new IOException("Received HTTP status " + status
+						+ " from remote endpoint while asking for /mountPoint!");
+			}
+			this.mountPathStr = new String(get.getResponseBody()).trim();
+		} finally {
+			get.releaseConnection();
+		}
+		LOG.info("Initialized MaggieFS with URI " + uri.toString() + " and local mount point " + this.mountPathStr);
 		this.setWorkingDirectory(getHomeDirectory());
 	}
 
 	@Override
 	public BlockLocation[] getFileBlockLocations(FileStatus file, long start,
 			long len) throws IOException {
+		System.out.println("Looking up block locations for " + file.getPath());
 		// resolve symlinks
 		Path fullSysPath = lookup(file.getPath());
 		File absFile = new File(fullSysPath.toUri().getPath());
@@ -124,8 +130,11 @@ public class MaggieFileSystem extends FileSystem {
 		// json endpoint expects relative path from mountpoint
 		String mountRelFile = resolvedFile.toString().substring(
 				this.mountPathStr.length());
+		// pop off leading slashes
+		mountRelFile = mountRelFile.replaceAll("^\\/*", "");
 		String url = "http://localhost:" + peerWebPort + "/blockLocations?"
 				+ "file=" + mountRelFile + "&start=" + start + "&length=" + len;
+		System.out.println("Getting block locations with url " + url);
 		// get block locations from json endpoint
 		GetMethod get = new GetMethod(url);
 		byte[] respBody = "[]".getBytes();
@@ -156,32 +165,74 @@ public class MaggieFileSystem extends FileSystem {
 		if (f.isDirectory()) {
 			throw new IOException("Cannot append to a diretory (=" + f + " ).");
 		}
-		return new FSDataOutputStream(new SyncableFileOutputStream(f, bufferSize,true), statistics);
+		return new FSDataOutputStream(new SyncableFileOutputStream(f,
+				bufferSize, true), statistics);
 	}
 
+	/** {@inheritDoc} */
 	@Override
-	public FSDataOutputStream create(Path p,
-		      FsPermission permission,
-		      boolean overwrite,
-		      int bufferSize,
-		      short replication,
-		      long blockSize,
-		      Progressable progress)
+	public FSDataOutputStream create(Path p, boolean overwrite, int bufferSize,
+			short replication, long blockSize, Progressable progress)
 			throws IOException {
+		return create(p, overwrite, true, bufferSize, replication, blockSize,
+				progress);
+	}
+
+	/** {@inheritDoc} */
+	@Override
+	public FSDataOutputStream create(Path p, FsPermission permission,
+			boolean overwrite, int bufferSize, short replication,
+			long blockSize, Progressable progress) throws IOException {
+		FSDataOutputStream out = create(p, overwrite, bufferSize, replication,
+				blockSize, progress);
+		setPermission(p, permission);
+		return out;
+	}
+
+	/** {@inheritDoc} */
+	@Override
+	public FSDataOutputStream createNonRecursive(Path p,
+			FsPermission permission, boolean overwrite, int bufferSize,
+			short replication, long blockSize, Progressable progress)
+			throws IOException {
+		FSDataOutputStream out = create(p, overwrite, false, bufferSize,
+				replication, blockSize, progress);
+		setPermission(p, permission);
+		return out;
+	}
+
+	private FSDataOutputStream create(Path p, boolean overwrite,
+			boolean createParent, int bufferSize, short replication,
+			long blockSize, Progressable progress) throws IOException {
 		File f = lookupFile(p);
 		if (f.exists() && !overwrite) {
-			throw new IOException("File already exists:"+f);
+			throw new IOException("File already exists:" + f);
 		}
 		Path parent = p.getParent();
-	    if (parent != null) {
-	      if (!exists(parent)) {
-	        throw new FileNotFoundException("Parent directory doesn't exist: "
-	            + parent);
-	      }
-	    }
-		FSDataOutputStream out = new FSDataOutputStream(new SyncableFileOutputStream(f, bufferSize, false), statistics);
-		FileUtil.setPermission(f, permission);
+		if (parent != null) {
+			if (!exists(parent)) {
+				if (!createParent && !exists(parent)) {
+					throw new FileNotFoundException(
+							"Parent directory doesn't exist: " + parent);
+				} else if (!mkdirs(parent)) {
+					throw new IOException("Mkdirs failed to create " + parent);
+				}
+			}
+		}
+		FSDataOutputStream out = new FSDataOutputStream(
+				new SyncableFileOutputStream(f, bufferSize, false), statistics);
 		return out;
+	}
+
+	private static final long DEFAULT_BLOCK_SIZE = 128 * 1024 * 1024 * 1024;
+
+	@Deprecated
+	public long getDefaultBlockSize() {
+		return DEFAULT_BLOCK_SIZE;
+	}
+
+	public long getDefaultBlockSize(Path f) {
+		return DEFAULT_BLOCK_SIZE;
 	}
 
 	@SuppressWarnings("deprecation")
@@ -193,9 +244,9 @@ public class MaggieFileSystem extends FileSystem {
 
 	@Override
 	public boolean delete(Path p, boolean recursive) throws IOException {
-		return raw.delete(lookup(p),recursive);
+		return raw.delete(lookup(p), recursive);
 	}
-	
+
 	@Override
 	public FileStatus getFileStatus(Path arg0) throws IOException {
 		return dereference(raw.getFileStatus(lookup(arg0)));
@@ -214,6 +265,9 @@ public class MaggieFileSystem extends FileSystem {
 	@Override
 	public FileStatus[] listStatus(Path arg0) throws IOException {
 		FileStatus[] rawFiles = raw.listStatus(lookup(arg0));
+		if (rawFiles == null) {
+			return new FileStatus[0];
+		}
 		FileStatus[] ret = new FileStatus[rawFiles.length];
 		for (int i = 0; i < ret.length; i++) {
 			ret[i] = dereference(rawFiles[i]);
