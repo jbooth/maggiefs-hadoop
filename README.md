@@ -25,7 +25,7 @@ Copy the jar from target/ to
 
 Then add the following lines to both core-site.xml and hbase-site.xml:
 
---
+```xml
   <property>
     <name>fs.default.name</name>
     <value>mfs://localhost:1103/</value>
@@ -37,5 +37,6 @@ Then add the following lines to both core-site.xml and hbase-site.xml:
     <value>org.maggiefs.hadoop.MaggieFileSystem</value>
     <description>The FileSystem for mfs: uris.</description>
   </property>
+```
 
 
