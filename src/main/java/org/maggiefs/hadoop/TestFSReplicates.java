@@ -33,6 +33,7 @@ public class TestFSReplicates {
 		out.close();
 		BlockLocation[] locs = fs.getFileBlockLocations(
 				fs.getFileStatus(testFilePath), 0, (200 * 1024 * 1024));
+		System.out.println("Block locs from 0-200MB: " + Arrays.asList(locs));
 		for (int i = 0 ; i < locs.length ; i++) {
 			System.out.println("hosts for block " + i + " : " + Arrays.asList(locs[i].getHosts()));
 			System.out.println("topology for block  " + i + " : " + Arrays.asList(locs[i].getTopologyPaths()));

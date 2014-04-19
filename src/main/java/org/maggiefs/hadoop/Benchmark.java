@@ -105,7 +105,7 @@ public class Benchmark extends Configured implements Tool {
 			long rreadTime = System.currentTimeMillis() - startRRead;
 			int numReads = (int)(fileLength / 4096);
 			System.out.println("Time to perform " + numReads + " random reads: " + rreadTime);
-			double msRead = rreadTime / numReads;
+			double msRead = ((double)rreadTime) / ((double)numReads);
 			System.out.println("Average ms / read: " + msRead);
 		} finally {
 			in.close();

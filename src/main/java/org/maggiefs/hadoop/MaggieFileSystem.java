@@ -4,10 +4,12 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
-import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.attribute.UserDefinedFileAttributeView;
+import java.util.ArrayList;
+import java.util.List;
 
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
 import org.apache.commons.httpclient.methods.GetMethod;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -37,52 +39,10 @@ public class MaggieFileSystem extends FileSystem {
 	private URI name;
 	private RawLocalFileSystem raw;
 	private Path workingDir;
-	private String mountPathStr;
-	private int peerWebPort;
-	private final HttpClient httpClient;
+	private String mountPrefix;
 	static {
 		Configuration.addDefaultResource("hdfs-default.xml");
 		Configuration.addDefaultResource("mfs-default.xml");
-	}
-
-	public MaggieFileSystem() {
-		MultiThreadedHttpConnectionManager connectionManager = new MultiThreadedHttpConnectionManager();
-		this.httpClient = new HttpClient(connectionManager);
-	}
-
-	/** Adds the mountpoint in front of the path, changes scheme to file */
-	private Path lookup(Path path) {
-		// handle working dir
-		if (!path.isAbsolute()) {
-			path = new Path(workingDir, path);
-		}
-		// handle mountpoint
-		String p = path.toUri().getPath();
-		p = this.mountPathStr + p;
-		Path ret = new Path("file", null, p);
-		return ret;
-	}
-
-	private File lookupFile(Path path) {
-		path = lookup(path);
-		return new File(path.toUri().getPath());
-	}
-
-	/* Strips off our mountPoint prefix, ensures scheme is mfs */
-	private FileStatus dereference(FileStatus s) {
-		return new FileStatus(s.getLen(), s.isDir(), s.getReplication(),
-				s.getBlockSize(), s.getModificationTime(), s.getAccessTime(),
-				s.getPermission(), s.getOwner(), s.getGroup(),
-				dereference(s.getPath()));
-	}
-
-	private Path dereference(Path p) {
-		String path = p.toUri().getPath();
-		if (path.startsWith(mountPathStr)) {
-			path = path.replace(mountPathStr, "/");
-		}
-		Path ret = new Path("mfs", "localhost:" + peerWebPort, path);
-		return ret;
 	}
 
 	public URI getUri() {
@@ -94,21 +54,8 @@ public class MaggieFileSystem extends FileSystem {
 		setConf(conf);
 		this.raw = (RawLocalFileSystem) FileSystem.getLocal(conf).getRaw();
 		this.name = uri;
-		this.peerWebPort = uri.getPort();
-		// this.mountPath = new Path("file", null, uri.getPath());
-		// get mountPath from local service endpoint
-		GetMethod get = new GetMethod("http://localhost:" + this.peerWebPort + "/mountPoint");
-		try {
-			int status = httpClient.executeMethod(get);
-			if (status >= 300) {
-				throw new IOException("Received HTTP status " + status
-						+ " from remote endpoint while asking for /mountPoint!");
-			}
-			this.mountPathStr = new String(get.getResponseBody()).trim();
-		} finally {
-			get.releaseConnection();
-		}
-		LOG.info("Initialized MaggieFS with URI " + uri.toString() + " and local mount point " + this.mountPathStr);
+		this.mountPrefix = conf.get("fs.mfs.mountPrefix");
+		LOG.info("Initialized MaggieFS with URI " + uri.toString() + ", mountPrefix: " + this.mountPrefix);
 		this.setWorkingDirectory(getHomeDirectory());
 	}
 
@@ -117,41 +64,72 @@ public class MaggieFileSystem extends FileSystem {
 			long len) throws IOException {
 		System.out.println("Looking up block locations for " + file.getPath());
 		// resolve symlinks
-		Path fullSysPath = lookup(file.getPath());
-		File absFile = new File(fullSysPath.toUri().getPath());
-		File resolvedFile = absFile.getCanonicalFile();
-
-		// throw error if not still in filesystem
-		if (!resolvedFile.toString().startsWith(this.mountPathStr)) {
-			throw new IOException("Symlink resolved to non mountpoint path "
-					+ resolvedFile.toString());
+		File absFile = lookupFile(file.getPath());
+		List<BlockLocation> ret = new ArrayList<BlockLocation>();
+		// get xattr
+		UserDefinedFileAttributeView attrs = Files.getFileAttributeView(
+				absFile.toPath(), UserDefinedFileAttributeView.class);
+		ByteBuffer buff = ByteBuffer.allocate(64 * 1024);
+		attrs.read("mfs.blockLocs", buff);
+		if (buff.remaining() == 0) {
+			return new BlockLocation[0];
 		}
-		// pop off mountpoint
-		// json endpoint expects relative path from mountpoint
-		String mountRelFile = resolvedFile.toString().substring(
-				this.mountPathStr.length());
-		// pop off leading slashes
-		mountRelFile = mountRelFile.replaceAll("^\\/*", "");
-		String url = "http://localhost:" + peerWebPort + "/blockLocations?"
-				+ "file=" + mountRelFile + "&start=" + start + "&length=" + len;
-		System.out.println("Getting block locations with url " + url);
-		// get block locations from json endpoint
-		GetMethod get = new GetMethod(url);
-		byte[] respBody = "[]".getBytes();
-		try {
-			int status = httpClient.executeMethod(get);
-			if (status >= 300) {
-				throw new IOException("Received HTTP status " + status
-						+ " from remote endpoint!");
+		buff.flip();
+		byte[] destBytes = new byte[buff.remaining()];
+		buff.get(destBytes);
+		String blockLocStr = new String(destBytes);
+		String[] lines = blockLocStr.split("\\n");
+		for (String line : lines) {
+			String[] elems = line.split("\\t");
+			long startPos = Integer.parseInt(elems[0]);
+			long endPos = Integer.parseInt(elems[1]);
+			String[] hosts = elems[2].split(",");
+			if ((startPos <= start && endPos > start)
+					|| (startPos < (start + len) && endPos > start)) {
+				ret.add(new BlockLocation(hosts, hosts, startPos,
+						(endPos - startPos)));
 			}
-			respBody = get.getResponseBody();
-		} finally {
-			get.releaseConnection();
 		}
-		// parse from json
-		ObjectMapper m = new ObjectMapper();
-		BlockLocation[] blocks = m.readValue(respBody, BlockLocation[].class);
-		return blocks;
+		return ret.toArray(new BlockLocation[ret.size()]);
+	}
+
+	/**
+	 * Adds the working dir in front of the path if necessary, changes scheme to
+	 * file
+	 */
+	private Path lookup(Path path) {
+		// handle working dir
+		if (!path.isAbsolute()) {
+			path = new Path(workingDir, path);
+		}
+		String p = path.toUri().getPath();
+		if (this.mountPrefix != null && this.mountPrefix.length() > 0) {
+			p = this.mountPrefix + p;
+		}
+		return new Path("file", null, p);
+	}
+
+	private File lookupFile(Path path) {
+		path = lookup(path);
+		return new File(path.toUri().getPath());
+	}
+
+	/* ensures scheme is mfs, pops off mountpoint if necessary */
+	private FileStatus dereference(FileStatus s) {
+		return new FileStatus(s.getLen(), s.isDir(), s.getReplication(),
+				s.getBlockSize(), s.getModificationTime(), s.getAccessTime(),
+				s.getPermission(), s.getOwner(), s.getGroup(),
+				dereference(s.getPath()));
+	}
+
+	/* ensures scheme is mfs, pops off mountpoint if necessary */
+	private Path dereference(Path p) {
+		String path = p.toUri().getPath();
+		if (this.mountPrefix != null && this.mountPrefix.length() > 0 && path.startsWith(mountPrefix)) {
+			path = path.replace(this.mountPrefix, "/");
+		}
+		Path ret = new Path("mfs", "", path);
+		return ret;
 	}
 
 	// delegate methods

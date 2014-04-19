@@ -11,4 +11,10 @@
   <value>org.maggiefs.hadoop.MaggieFileSystem</value>
   <description>The FileSystem for mfs: uris.</description>
 </property>
+
+<property>
+  <name>fs.mfs.mountPrefix</name>
+  <value></value>
+  <description>Mount prefix which is auto-prepended to all filename lookups.</description>
+</property>
 </configuration>
