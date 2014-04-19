@@ -28,15 +28,26 @@ Then add the following lines to both core-site.xml and hbase-site.xml:
 ```xml
   <property>
     <name>fs.default.name</name>
-    <value>mfs://localhost:1103/</value>
+    <value>mfs:///</value>
   </property>
-
 
   <property>
     <name>fs.mfs.impl</name>
     <value>org.maggiefs.hadoop.MaggieFileSystem</value>
     <description>The FileSystem for mfs: uris.</description>
   </property>
+
+  <!-- Optional, use this to configure a mountPoint prefix on a per-host basis and use global paths, rather 
+       than including the path to the mountpoint when interacting with the system. 
+       i.e.:  Set this to /mfs if you've mounted at /mfs and would like to use /user/jay/hi.txt as a path -->
+  <property>
+    <name>fs.mfs.mountPrefix</name>
+    <value></value>
+    <description>Mount prefix which is auto-prepended to all filename lookups.</description>
+  </property>
+
+
+
 ```
 
 Make sure the config values and the jar are distributed to all machines in the cluster.  
